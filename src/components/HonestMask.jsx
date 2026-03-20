@@ -1,16 +1,18 @@
-import React, { useState, useEffect, createContext, useContext } from 'react';
+import React, { useState, useEffect, useRef, createContext, useContext } from 'react';
 import { motion, useSpring, useMotionValue, useMotionTemplate, useTransform } from 'framer-motion';
 
 const CursorContext = createContext();
 
-export const CursorProvider = ({ children }) => {
-    const mouseX = useMotionValue(0);
-    const mouseY = useMotionValue(0);
-    const [isHovering, setIsHovering] = useState(false);
+export const CursorProvider = ({ children, isLoaded }) => {
+    const mouseX = useMotionValue(-1000);
+    const mouseY = useMotionValue(-1000);
+    const [hoverCount, setHoverCount] = useState(0); // Counter to handle multiple hovers
+    const isHoveringVal = useMotionValue(0);
 
     const springConfig = { damping: 25, stiffness: 150 };
     const cursorX = useSpring(mouseX, springConfig);
     const cursorY = useSpring(mouseY, springConfig);
+    const hoverSpring = useSpring(isHoveringVal, springConfig);
 
     useEffect(() => {
         const handleMouseMove = (e) => {
@@ -21,8 +23,21 @@ export const CursorProvider = ({ children }) => {
         return () => window.removeEventListener('mousemove', handleMouseMove);
     }, []);
 
+    // Global toggle for all children
+    const setIsHovering = (isHovering) => {
+        setHoverCount(prev => isHovering ? prev + 1 : Math.max(0, prev - 1));
+    };
+
+    useEffect(() => {
+        isHoveringVal.set(hoverCount > 0 ? 1 : 0);
+    }, [hoverCount]);
+
     return (
-        <CursorContext.Provider value={{ cursorX, cursorY, mouseX, mouseY, isHovering, setIsHovering }}>
+        <CursorContext.Provider value={{ 
+            cursorX, cursorY, mouseX, mouseY, 
+            isHovering: hoverCount > 0, 
+            setIsHovering, hoverSpring, isLoaded 
+        }}>
             {children}
             <CustomCursor />
         </CursorContext.Provider>
@@ -32,7 +47,8 @@ export const CursorProvider = ({ children }) => {
 export const useCursor = () => useContext(CursorContext);
 
 const CustomCursor = () => {
-    const { cursorX, cursorY, isHovering } = useCursor();
+    const { cursorX, cursorY, hoverSpring } = useCursor();
+    const size = useTransform(hoverSpring, [0, 1], [12, 300]);
 
     return (
         <motion.div
@@ -41,87 +57,116 @@ const CustomCursor = () => {
                 top: cursorY,
                 translateX: '-50%',
                 translateY: '-50%',
+                width: size,
+                height: size,
             }}
-            className="fixed pointer-events-none z-[9999] flex items-center justify-center"
-            animate={{
-                width: isHovering ? 300 : 12,
-                height: isHovering ? 300 : 12,
-            }}
+            className="fixed pointer-events-none z-[20000] flex items-center justify-center"
         >
-            <div className={`w-full h-full rounded-full bg-accent transition-opacity duration-300 ${isHovering ? 'opacity-100' : 'opacity-100'}`} />
+            <div className="w-full h-full rounded-full bg-accent shadow-[0_0_50px_rgba(235,94,40,0.3)]" />
         </motion.div>
     );
 };
 
 export const DualText = ({ professional, honest }) => {
-    const { setIsHovering, cursorX, cursorY, mouseX, mouseY } = useCursor();
+    const { setIsHovering, cursorX, cursorY, mouseX, mouseY, hoverSpring, isLoaded } = useCursor();
     const [isLocalHover, setIsLocalHover] = useState(false);
-    const [rect, setRect] = useState({ left: 0, top: 0 });
-    const containerRef = React.useRef(null);
-    const hoverRef = React.useRef(false);
+    const [measured, setMeasured] = useState(false);
+    const containerRef = useRef(null);
+    const isHoveredRef = useRef(false); // Direct reference for synchronous logic
+    
+    // Motion values for element position
+    const rectLeft = useMotionValue(0);
+    const rectTop = useMotionValue(0);
 
-    hoverRef.current = isLocalHover;
-
-    useEffect(() => {
-        const updateRect = () => {
-            if (containerRef.current) {
-                const newRect = containerRef.current.getBoundingClientRect();
-                setRect({ left: newRect.left, top: newRect.top });
-
-                const mx = mouseX.get();
-                const my = mouseY.get();
-                const isMouseInside = mx >= newRect.left && mx <= newRect.right && my >= newRect.top && my <= newRect.bottom;
-
-                if (hoverRef.current && !isMouseInside) {
-                    // Cursor scrolled out from under text → un-hover
-                    setIsHovering(false);
-                    setIsLocalHover(false);
-                } else if (!hoverRef.current && isMouseInside) {
-                    // Text scrolled into a stationary cursor → hover
-                    setIsHovering(true);
-                    setIsLocalHover(true);
-                }
+    const updateRectAndCollision = () => {
+        if (!containerRef.current || !isLoaded) {
+            // Force reset if splash screen is still up
+            if (isHoveredRef.current) {
+                isHoveredRef.current = false;
+                setIsLocalHover(false);
+                setIsHovering(false);
             }
-        };
-        updateRect();
-        window.addEventListener('resize', updateRect);
-        // Important: Listen to document scroll, not just window scroll
-        document.addEventListener('scroll', updateRect, true);
+            return;
+        }
+        
+        const rect = containerRef.current.getBoundingClientRect();
+        rectLeft.set(rect.left);
+        rectTop.set(rect.top);
+        if (!measured) setMeasured(true);
+
+        const mx = mouseX.get();
+        const my = mouseY.get();
+        const isInside = (
+            mx >= rect.left && 
+            mx <= rect.right && 
+            my >= rect.top && 
+            my <= rect.bottom
+        );
+
+        if (isInside !== isHoveredRef.current) {
+            isHoveredRef.current = isInside;
+            setIsLocalHover(isInside);
+            setIsHovering(isInside);
+        }
+    };
+
+    // Calculate relative position for the masks
+    const relativeX = useTransform([cursorX, rectLeft], ([x, left]) => x - left);
+    const relativeY = useTransform([cursorY, rectTop], ([y, top]) => y - top);
+    const maskRadius = useTransform(hoverSpring, [0, 1], [0, 150]);
+    
+    // The reveal mask: shows only inside the circle
+    const maskImage = useMotionTemplate`radial-gradient(${maskRadius}px circle at ${relativeX}px ${relativeY}px, black 100%, transparent 100%)`;
+    
+    useEffect(() => {
+        // Update whenever mouse moves, page scrolls, or splash screen finishes
+        updateRectAndCollision();
+        
+        const unsubX = mouseX.on('change', updateRectAndCollision);
+        const unsubY = mouseY.on('change', updateRectAndCollision);
+        
+        // Polling to handle transitions/layout shifts
+        const interval = setInterval(updateRectAndCollision, 50);
+        
+        window.addEventListener('resize', updateRectAndCollision);
+        window.addEventListener('scroll', updateRectAndCollision, true);
+
+        const observer = new ResizeObserver(updateRectAndCollision);
+        if (containerRef.current) observer.observe(containerRef.current);
 
         return () => {
-            window.removeEventListener('resize', updateRect);
-            document.removeEventListener('scroll', updateRect, true);
+            unsubX();
+            unsubY();
+            clearInterval(interval);
+            window.removeEventListener('resize', updateRectAndCollision);
+            window.removeEventListener('scroll', updateRectAndCollision, true);
+            observer.disconnect();
+            
+            if (isHoveredRef.current) {
+                setIsHovering(false);
+            }
         };
-    }, []);
-
-    // cursorX and cursorY are clientX/clientY (relative to viewport).
-    // rect.left and rect.top are also relative to viewport! 
-    // They are perfectly synchronized naturally, as long as rect is updated on scroll.
-    // Calculate cursor position strictly relative to the container's top-left corner
-    const relativeX = useTransform(cursorX, x => x - rect.left);
-    const relativeY = useTransform(cursorY, y => y - rect.top);
-    const maskImage = useMotionTemplate`radial-gradient(150px circle at ${relativeX}px ${relativeY}px, black 100%, transparent 100%)`;
+    }, [isLoaded]); // CRITICAL: Re-initialize listeners and force check when splash screen vanishes
 
     return (
         <span
-            className="relative inline-grid group"
-            onMouseEnter={() => { setIsHovering(true); setIsLocalHover(true); }}
-            onMouseLeave={() => { setIsHovering(false); setIsLocalHover(false); }}
             ref={containerRef}
-            style={{ cursor: "none" }}
+            className="relative inline-grid group"
+            onMouseMove={updateRectAndCollision}
+            style={{ cursor: 'none' }}
         >
-            {/* Professional Text (Always 100% visible, no fading) */}
-            <span className="[grid-area:1/1] whitespace-nowrap text-inherit flex items-center justify-center pointer-events-none">
+            {/* Professional Text – always visible (will be covered by the orange ball) */}
+            <span className="[grid-area:1/1] relative whitespace-normal text-center text-inherit flex items-center justify-center pointer-events-none select-none">
                 {professional}
             </span>
 
-            {/* Honest Text (Top Layer - identical size, but masked to show only under cursor) */}
+            {/* Honest Text – revealed only where the cursor is */}
             <motion.span
-                className="[grid-area:1/1] pointer-events-none text-background font-black whitespace-nowrap flex items-center justify-center z-[10000]"
+                className="[grid-area:1/1] relative pointer-events-none text-[#0D0D0D] font-black whitespace-normal text-center flex items-center justify-center z-[20001]"
                 style={{
                     WebkitMaskImage: maskImage,
                     maskImage: maskImage,
-                    opacity: isLocalHover ? 1 : 0
+                    opacity: hoverSpring,
                 }}
             >
                 {honest}
